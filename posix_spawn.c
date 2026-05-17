@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 #include <string.h>
 #include <stdbool.h>
+#include <paths.h>
 
 #include "utils.h"
 #include "libiosexec.h"
@@ -14,21 +15,15 @@ int ie_posix_spawn(pid_t *pid, const char *path,
                        const posix_spawnattr_t *attrp,
                        char *const argv[],
                        char *const envp[]) {
-   bool bypass_sysposix_spawn = false;
    int err;
+   err = posix_spawn(pid, path, file_actions, attrp, argv, envp);
 
-#if LIBIOSEXEC_PREFIXED_ROOT == 1
-   if (is_shell_script(path)) {
-       bypass_sysposix_spawn = true;
-   }
-#endif
-
-   if (!bypass_sysposix_spawn)
-       err = posix_spawn(pid, path, file_actions, attrp, argv, envp);
-
-   if (!bypass_sysposix_spawn && (err != EPERM && err != ENOEXEC)) {
+   if (err != EPERM && err != ENOEXEC) {
        return err;
    }
+
+   if (!is_shell_script(path))
+       return err;
 
    char** new_args = get_new_argv(path, argv);
    if (new_args == NULL) {
@@ -62,7 +57,7 @@ ie_posix_spawnp(pid_t *pid, const char *file,
 	char path_buf[PATH_MAX];
 
 	if ((env_path = getenv("PATH")) == NULL)
-		env_path = DEFAULT_PATH;
+		env_path = _PATH_DEFPATH;
 
 	/* If it's an absolute or relative path name, it's easy. */
 	if (strchr(file, '/')) {
@@ -128,7 +123,7 @@ retry:		err = ie_posix_spawn(pid, bp, file_actions, attrp, argv, envp);
 			memp[0] = "sh";
 			memp[1] = bp;
 			bcopy(argv + 1, memp + 2, cnt * sizeof(char *));
-			err = ie_posix_spawn(pid, "/bin/sh", file_actions, attrp, memp, envp);
+			err = ie_posix_spawn(pid, _PATH_BSHELL, file_actions, attrp, memp, envp);
 			goto done;
 		default:
 			/*

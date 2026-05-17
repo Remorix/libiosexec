@@ -1,0 +1,4 @@
+   /var/jb/bin/sh
+# comment
+/var/jb/bin/csh
+/var/jb/bin/zsh # keep trailing comment
