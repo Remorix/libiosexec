@@ -1,168 +1,98 @@
-/*
- * Copyright (c) 1999 Apple Computer, Inc. All rights reserved.
- *
- * @APPLE_LICENSE_HEADER_START@
- *
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- *
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
- * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
- * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
- *
- * @APPLE_LICENSE_HEADER_END@
- */
-/*
- * Copyright (c) 1985, 1993
- *	The Regents of the University of California.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *	This product includes software developed by the University of
- *	California, Berkeley and its contributors.
- * 4. Neither the name of the University nor the names of its contributors
- *    may be used to endorse or promote products derived from this software
- *    without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- */
-
-#include <paths.h>
-#include <ctype.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-
-#include <sys/param.h>
-#include <sys/stat.h>
-
-#ifdef __APPLE__
-#include <xlocale.h>
-#endif
+#include <dlfcn.h>
+#include <errno.h>
+#include <stddef.h>
 
 #include "libiosexec.h"
-#include "libiosexec_private.h"
 
-/*
- * Local shells should NOT be added here.  They should be added in
- * /etc/shells.
- */
+typedef char *(*compat_getusershell_fn)(void);
+typedef void (*compat_setusershell_fn)(void);
+typedef void (*compat_endusershell_fn)(void);
 
-static const char *const okshells[] = { _PATH_BSHELL, _PATH_CSHELL, NULL };
-static char **curshell, **shells, *strings;
-static char **initshells(void);
+#if LIBIOSEXEC_PREFIXED_ROOT == 1
+#define LIBRECOMPAT_DYLIB_PATH "/var/jb/usr/lib/librecompat.0.dylib"
+#else
+#define LIBRECOMPAT_DYLIB_PATH "/usr/lib/librecompat.0.dylib"
+#endif
 
-/*
- * Get a list of shells from _PATH_SHELLS, if it exists.
- */
+static void *
+open_librecompat_handle(void)
+{
+	void *handle;
+
+	handle = dlopen(LIBRECOMPAT_DYLIB_PATH, RTLD_LAZY | RTLD_NOLOAD);
+	if (handle != NULL)
+		return handle;
+
+	handle = dlopen(LIBRECOMPAT_DYLIB_PATH, RTLD_LAZY);
+	if (handle != NULL)
+		return handle;
+
+	return NULL;
+}
+
+static compat_getusershell_fn
+resolve_compat_getusershell(void)
+{
+	void *handle;
+
+	handle = open_librecompat_handle();
+	if (handle == NULL)
+		return NULL;
+	return (compat_getusershell_fn)dlsym(handle, "compat_getusershell");
+}
+
+static compat_setusershell_fn
+resolve_compat_setusershell(void)
+{
+	void *handle;
+
+	handle = open_librecompat_handle();
+	if (handle == NULL)
+		return NULL;
+	return (compat_setusershell_fn)dlsym(handle, "compat_setusershell");
+}
+
+static compat_endusershell_fn
+resolve_compat_endusershell(void)
+{
+	void *handle;
+
+	handle = open_librecompat_handle();
+	if (handle == NULL)
+		return NULL;
+	return (compat_endusershell_fn)dlsym(handle, "compat_endusershell");
+}
+
 char *
 ie_getusershell(void)
 {
-	char *ret;
+	compat_getusershell_fn fn;
 
-	if (curshell == NULL)
-		curshell = initshells();
-	ret = *curshell;
-	if (ret != NULL)
-		curshell++;
-	return (ret);
-}
+	fn = resolve_compat_getusershell();
+	if (fn == NULL) {
+		errno = ENOSYS;
+		return NULL;
+	}
 
-void
-ie_endusershell(void)
-{
-	if (shells != NULL)
-		free(shells);
-	shells = NULL;
-	if (strings != NULL)
-		free(strings);
-	strings = NULL;
-	curshell = NULL;
+	return fn();
 }
 
 void
 ie_setusershell(void)
 {
+	compat_setusershell_fn fn;
 
-	curshell = initshells();
+	fn = resolve_compat_setusershell();
+	if (fn != NULL)
+		fn();
 }
 
-static char **
-initshells(void)
+void
+ie_endusershell(void)
 {
-	char **sp, *cp;
-	FILE *fp;
-	struct stat statb;
-#ifdef __APPLE__
-	locale_t loc = uselocale(NULL);
-#endif
+	compat_endusershell_fn fn;
 
-	free(shells);
-	shells = NULL;
-	if (strings != NULL)
-		free(strings);
-	strings = NULL;
-	if ((fp = fopen(_PATH_SHELLS, "r")) == NULL)
-		return (char **)okshells;
-	if (fstat(fileno(fp), &statb) == -1) {
-		(void)fclose(fp);
-		return (char **)okshells;
-	}
-	if ((strings = malloc((u_int)statb.st_size)) == NULL) {
-		(void)fclose(fp);
-		return (char **)okshells;
-	}
-	shells = calloc((unsigned)statb.st_size / 3, sizeof(char *));
-	if (shells == NULL) {
-		(void)fclose(fp);
-		free(strings);
-		strings = NULL;
-		return (char **)okshells;
-	}
-
-	sp = shells;
-	cp = strings;
-	while (fgets(cp, MAXPATHLEN + 1, fp) != NULL) {
-		while (*cp != '#' && *cp != '/' && *cp != '\0')
-			cp++;
-		if (*cp == '#' || *cp == '\0')
-			continue;
-		*sp++ = cp;
-#ifdef __APPLE__
-		while (!isspace_l(*cp, loc) && *cp != '#' && *cp != '\0')
-#else
-		while (!isspace((unsigned char)*cp) && *cp != '#' && *cp != '\0')
-#endif
-			cp++;
-		*cp++ = '\0';
-	}
-	*sp = NULL;
-	(void)fclose(fp);
-	return (shells);
+	fn = resolve_compat_endusershell();
+	if (fn != NULL)
+		fn();
 }
