@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <sys/uio.h>
 #include <stdbool.h>
+#include <paths.h>
 
 #include "utils.h"
 #include "libiosexec.h"
@@ -21,21 +22,16 @@
 extern char** environ;
 
 int ie_execve(const char* path, char* const argv[], char* const envp[]) {
-    bool bypass_sysexecve = false;
-
-#if LIBIOSEXEC_PREFIXED_ROOT == 1
-    if (is_shell_script(path)) {
-        bypass_sysexecve = true;
-    }
-#endif
-
-    if (!bypass_sysexecve) {
-        execve(path, argv, envp);
-    }
+    execve(path, argv, envp);
 
     int execve_ret = errno;
 
-    if (!bypass_sysexecve && (execve_ret != EPERM && execve_ret != ENOEXEC)) {
+    if (execve_ret != EPERM && execve_ret != ENOEXEC) {
+        return -1;
+    }
+
+    if (!is_shell_script(path)) {
+        errno = execve_ret;
         return -1;
     }
 
@@ -81,7 +77,7 @@ int ie_execvpe(const char *name, char *const *argv, char *const *envp) {
 
 	/* Get the path we're searching. */
 	if (!(path = getenv("PATH")))
-		path = DEFAULT_PATH;
+		path = _PATH_DEFPATH;
 	len = strlen(path) + 1;
 	cur = alloca(len);
 	if (cur == NULL) {
@@ -142,7 +138,7 @@ retry:		(void)ie_execve(bp, argv, envp);
 			memp[0] = "sh";
 			memp[1] = bp;
 			bcopy(argv + 1, memp + 2, cnt * sizeof(char *));
-			(void)ie_execve(DEFAULT_INTERPRETER, memp, envp);
+			(void)ie_execve(_PATH_BSHELL, memp, envp);
 			goto done;
 		case ENOMEM:
 			goto done;

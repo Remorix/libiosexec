@@ -1,4 +1,25 @@
-/*	$OpenBSD: getusershell.c,v 1.18 2019/12/10 02:35:16 millert Exp $ */
+/*
+ * Copyright (c) 1999 Apple Computer, Inc. All rights reserved.
+ *
+ * @APPLE_LICENSE_HEADER_START@
+ *
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ *
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
+ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
+ *
+ * @APPLE_LICENSE_HEADER_END@
+ */
 /*
  * Copyright (c) 1985, 1993
  *	The Regents of the University of California.  All rights reserved.
@@ -11,7 +32,11 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the University nor the names of its contributors
+ * 3. All advertising materials mentioning features or use of this software
+ *    must display the following acknowledgement:
+ *	This product includes software developed by the University of
+ *	California, Berkeley and its contributors.
+ * 4. Neither the name of the University nor the names of its contributors
  *    may be used to endorse or promote products derived from this software
  *    without specific prior written permission.
  *
@@ -29,47 +54,29 @@
  */
 
 #include <paths.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 
-#include <sys/errno.h>
+#include <sys/param.h>
+#include <sys/stat.h>
+
+#ifdef __APPLE__
+#include <xlocale.h>
+#endif
 
 #include "libiosexec.h"
 #include "libiosexec_private.h"
-
-#ifdef _PATH_BSHELL
-#undef _PATH_BSHELL
-#endif
-
-#ifdef _PATH_CSHELL
-#undef _PATH_CSHELL
-#endif
-
-#ifdef _PATH_KSHELL
-#undef _PATH_KSHELL
-#endif
-
-#ifdef _PATH_SHELLS
-#undef _PATH_SHELLS
-#endif
-
-#define _PATH_BSHELL SHEBANG_REDIRECT_PATH "/usr/bin/sh"
-#define _PATH_CSHELL SHEBANG_REDIRECT_PATH "/usr/bin/csh"
-#define _PATH_KSHELL SHEBANG_REDIRECT_PATH "/usr/bin/ksh"
-
-#define _PATH_SHELLS SHEBANG_REDIRECT_PATH "/etc/shells"
 
 /*
  * Local shells should NOT be added here.  They should be added in
  * /etc/shells.
  */
 
-static char *okshells[] = { _PATH_BSHELL, _PATH_CSHELL, _PATH_KSHELL, NULL };
-static char **curshell, **shells;
+static const char *const okshells[] = { _PATH_BSHELL, _PATH_CSHELL, NULL };
+static char **curshell, **shells, *strings;
 static char **initshells(void);
-static void *reallocarray(void *optr, size_t nmemb, size_t size);
 
 /*
  * Get a list of shells from _PATH_SHELLS, if it exists.
@@ -90,14 +97,12 @@ ie_getusershell(void)
 void
 ie_endusershell(void)
 {
-	char **s;
-
-	if ((s = shells))
-		while (*s)
-			free(*s++);
-	free(shells);
+	if (shells != NULL)
+		free(shells);
 	shells = NULL;
-
+	if (strings != NULL)
+		free(strings);
+	strings = NULL;
 	curshell = NULL;
 }
 
@@ -111,72 +116,53 @@ ie_setusershell(void)
 static char **
 initshells(void)
 {
-	size_t nshells, nalloc, linesize;
-	char *line;
+	char **sp, *cp;
 	FILE *fp;
+	struct stat statb;
+#ifdef __APPLE__
+	locale_t loc = uselocale(NULL);
+#endif
 
 	free(shells);
 	shells = NULL;
-
-	if ((fp = fopen(_PATH_SHELLS, "re")) == NULL)
-		return (okshells);
-
-	line = NULL;
-	nalloc = 10; // just an initial guess
-	nshells = 0;
-	shells = reallocarray(NULL, nalloc, sizeof (char *));
-	if (shells == NULL)
-		goto fail;
-	linesize = 0;
-	while (getline(&line, &linesize, fp) != -1) {
-		if (*line != '/')
-			continue;
-		line[strcspn(line, "#\n")] = '\0';
-		if (!(shells[nshells] = strdup(line)))
-			goto fail;
-
-		if (nshells + 1 == nalloc) {
-			char **new = reallocarray(shells, nalloc * 2, sizeof(char *));
-			if (!new)
-				goto fail;
-			shells = new;
-			nalloc *= 2;
-		}
-		nshells++;
+	if (strings != NULL)
+		free(strings);
+	strings = NULL;
+	if ((fp = fopen(_PATH_SHELLS, "r")) == NULL)
+		return (char **)okshells;
+	if (fstat(fileno(fp), &statb) == -1) {
+		(void)fclose(fp);
+		return (char **)okshells;
 	}
-	free(line);
-	shells[nshells] = NULL;
+	if ((strings = malloc((u_int)statb.st_size)) == NULL) {
+		(void)fclose(fp);
+		return (char **)okshells;
+	}
+	shells = calloc((unsigned)statb.st_size / 3, sizeof(char *));
+	if (shells == NULL) {
+		(void)fclose(fp);
+		free(strings);
+		strings = NULL;
+		return (char **)okshells;
+	}
+
+	sp = shells;
+	cp = strings;
+	while (fgets(cp, MAXPATHLEN + 1, fp) != NULL) {
+		while (*cp != '#' && *cp != '/' && *cp != '\0')
+			cp++;
+		if (*cp == '#' || *cp == '\0')
+			continue;
+		*sp++ = cp;
+#ifdef __APPLE__
+		while (!isspace_l(*cp, loc) && *cp != '#' && *cp != '\0')
+#else
+		while (!isspace((unsigned char)*cp) && *cp != '#' && *cp != '\0')
+#endif
+			cp++;
+		*cp++ = '\0';
+	}
+	*sp = NULL;
 	(void)fclose(fp);
 	return (shells);
-
-fail:
-	free(line);
-	while (nshells)
-		free(shells[nshells--]);
-	free(shells);
-	shells = NULL;
-	(void)fclose(fp);
-	return (okshells);
-}
-
-
-// The following taken from OpenBSD reallocarray.c
-
-/*
- * This is sqrt(SIZE_MAX+1), as s1*s2 <= SIZE_MAX
- * if both s1 < MUL_NO_OVERFLOW and s2 < MUL_NO_OVERFLOW
- */
-#define MUL_NO_OVERFLOW	((size_t)1 << (sizeof(size_t) * 4))
-
-static void *
-reallocarray(void *optr, size_t nmemb, size_t size)
-{
-	if ((nmemb >= MUL_NO_OVERFLOW || size >= MUL_NO_OVERFLOW) &&
-	    nmemb > 0 && SIZE_MAX / nmemb < size) {
-		errno = ENOMEM;
-		return NULL;
-	}
-	if (size == 0 || nmemb == 0)
-	    return NULL;
-	return realloc(optr, size * nmemb);
 }

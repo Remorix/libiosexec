@@ -1,0 +1,61 @@
+#ifndef LIBIOSEXEC_PATHS_H
+#define LIBIOSEXEC_PATHS_H
+
+#include <sys/paths.h>
+
+#ifdef _PATH_BSHELL
+#undef _PATH_BSHELL
+#endif
+#define _PATH_BSHELL "@LIBIOSEXEC_BSHELL@"
+
+#ifdef _PATH_CSHELL
+#undef _PATH_CSHELL
+#endif
+#define _PATH_CSHELL "@LIBIOSEXEC_CSHELL@"
+
+#ifdef _PATH_KSHELL
+#undef _PATH_KSHELL
+#endif
+#define _PATH_KSHELL "@LIBIOSEXEC_KSHELL@"
+
+#ifdef _PATH_SHELLS
+#undef _PATH_SHELLS
+#endif
+#define _PATH_SHELLS "@LIBIOSEXEC_SHELLS@"
+
+#ifdef _PATH_DEFPATH
+#undef _PATH_DEFPATH
+#endif
+#define _PATH_DEFPATH "@LIBIOSEXEC_DEFPATH@"
+
+#ifdef _PATH_STDPATH
+#undef _PATH_STDPATH
+#endif
+#define _PATH_STDPATH "@LIBIOSEXEC_STDPATH@"
+
+#ifdef _PATH_PASSWD
+#undef _PATH_PASSWD
+#endif
+#define _PATH_PASSWD "@LIBIOSEXEC_PASSWD@"
+
+#ifdef _PATH_MASTERPASSWD
+#undef _PATH_MASTERPASSWD
+#endif
+#define _PATH_MASTERPASSWD "@LIBIOSEXEC_MASTERPASSWD@"
+
+#ifdef _PATH_GROUP
+#undef _PATH_GROUP
+#endif
+#define _PATH_GROUP "@LIBIOSEXEC_GROUP@"
+
+#ifdef _PATH_MP_DB
+#undef _PATH_MP_DB
+#endif
+#define _PATH_MP_DB "@LIBIOSEXEC_MP_DB@"
+
+#ifdef _PATH_SMP_DB
+#undef _PATH_SMP_DB
+#endif
+#define _PATH_SMP_DB "@LIBIOSEXEC_SMP_DB@"
+
+#endif
