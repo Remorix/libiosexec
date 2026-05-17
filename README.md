@@ -10,4 +10,18 @@ There's not that much to say here; simply define the symbols in your project/scr
     /* Wrapper functions to make iOS shells scripts function correctly */
     #include <libiosexec.h>
 
-<sub>Note that this implementation follows FreeBSD/Linux behavior of not splitting the argument passed to the shebang, unlike macOS which does.</sub>
+<sub>Remorix policy: unlike Procursus libiosexec, this fork follows XNU shebang tokenization semantics on iOS when emulating kernel shebang execution in userspace.</sub>
+
+```text
+for a script with shebang:
+  #!/usr/bin/env bash -e
+
+original exec call:
+  execve("./script", ["./script", "arg1"])
+
+Procursus-style argv:
+  ["/usr/bin/env", "bash -e", "./script", "arg1"]
+
+Remorix / XNU-style argv:
+  ["/usr/bin/env", "bash", "-e", "./script", "arg1"]
+```
