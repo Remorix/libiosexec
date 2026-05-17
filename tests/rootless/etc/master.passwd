@@ -1,0 +1,2 @@
+root:*:0:0::0:0:root:/var/root:/var/jb/bin/sh
+mobile:*:501:501::0:0:mobile:/var/mobile:/var/jb/bin/sh

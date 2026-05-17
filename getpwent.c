@@ -20,7 +20,7 @@
  * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
  * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS AND CONTRIBUTORS BE LIABLE
  * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
  * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
  * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
@@ -32,9 +32,6 @@
 
 #include <sys/types.h>
 #include <sys/mman.h>
-#include <fcntl.h>
-#include <db.h>
-#include <syslog.h>
 #include <pwd.h>
 #include <errno.h>
 #include <unistd.h>
@@ -42,6 +39,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <stdio.h>
 #include <sys/param.h>
 
 #include "libiosexec.h"
@@ -57,16 +55,7 @@
 #define _THREAD_PRIVATE_MUTEX_UNLOCK(name)              do {} while (0)
 
 #define _PW_BUF_LEN 1024
-
-#if 0
-#undef _PATH_MP_DB
-#define _PATH_MP_DB "/tmp/passwd/pwd.db"
-
-#undef _PATH_SMP_DB
-#define _PATH_SMP_DB "/tmp/passwd/spwd.db"
-#endif
-
-#define MINIMUM(a, b)	(((a) < (b)) ? (a) : (b))
+#define _PW_LINE_LEN 1024
 
 struct pw_storage {
 	struct passwd pw;
@@ -77,51 +66,33 @@ struct pw_storage {
 
 _THREAD_PRIVATE_KEY(pw);
 
-static DB *_pw_db;			/* password database */
-
 /* mmap'd password storage */
 static struct pw_storage *_pw_storage = MAP_FAILED;
+static FILE *_pw_fp;
+static int _pw_stayopen;
+static bool _pw_master_format;
 
-/* Following are used only by setpwent(), getpwent(), and endpwent() */
-static int _pw_keynum;			/* key counter */
-static int _pw_stayopen;		/* keep fd's open */
-static int _pw_flags;			/* password flags */
-
-static int __hashpw(DBT *, char *buf, size_t buflen, struct passwd *, int *);
-static int __initdb(int);
-static struct passwd *_pwhashbyname(const char *name, char *buf,
-	size_t buflen, struct passwd *pw, int *);
-static struct passwd *_pwhashbyuid(uid_t uid, char *buf,
-	size_t buflen, struct passwd *pw, int *);
-
+static struct passwd *__get_pw_buf(char **bufp, size_t *buflenp, uid_t uid,
+    const char *name);
+static int parse_passwd_line(char *line, struct passwd *pw, char *buf,
+    size_t buflen, bool master_format, bool *has_shadow);
+static int read_passwd_file(FILE *fp, struct passwd *pw, char *buf,
+    size_t buflen, bool master_format, bool match_uid, uid_t uid,
+    const char *name, bool *has_shadow);
+static FILE *open_passwd_file(bool shadow, bool *master_format);
 
 static struct passwd *
 __get_pw_buf(char **bufp, size_t *buflenp, uid_t uid, const char *name)
 {
 	bool remap = true;
 
-	/* Unmap the old buffer unless we are looking up the same uid/name */
 	if (_pw_storage != MAP_FAILED) {
 		if (name != NULL) {
-			if (strcmp(_pw_storage->name, name) == 0) {
-#ifdef PWDEBUG
-				struct syslog_data sdata = SYSLOG_DATA_INIT;
-				syslog_r(LOG_CRIT | LOG_CONS, &sdata,
-				    "repeated passwd lookup of user \"%s\"",
-				    name);
-#endif
+			if (strcmp(_pw_storage->name, name) == 0)
 				remap = false;
-			}
 		} else if (uid != (uid_t)-1) {
-			if (_pw_storage->uid == uid) {
-#ifdef PWDEBUG
-				struct syslog_data sdata = SYSLOG_DATA_INIT;
-				syslog_r(LOG_CRIT | LOG_CONS, &sdata,
-				    "repeated passwd lookup of uid %u",
-				    uid);
-#endif
+			if (_pw_storage->uid == uid)
 				remap = false;
-			}
 		}
 		if (remap)
 			munmap(_pw_storage, sizeof(*_pw_storage));
@@ -129,11 +100,13 @@ __get_pw_buf(char **bufp, size_t *buflenp, uid_t uid, const char *name)
 
 	if (remap) {
 		_pw_storage = mmap(NULL, sizeof(*_pw_storage),
-		    PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
+		    PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
 		if (_pw_storage == MAP_FAILED)
 			return NULL;
 		if (name != NULL)
 			strlcpy(_pw_storage->name, name, sizeof(_pw_storage->name));
+		else
+			_pw_storage->name[0] = '\0';
 		_pw_storage->uid = uid;
 	}
 
@@ -142,78 +115,188 @@ __get_pw_buf(char **bufp, size_t *buflenp, uid_t uid, const char *name)
 	return &_pw_storage->pw;
 }
 
+static int
+copy_field(char **dst, char **cursor, size_t *remaining, const char *src)
+{
+	size_t len = strlen(src) + 1;
+
+	if (len > *remaining) {
+		errno = ERANGE;
+		return 0;
+	}
+
+	memcpy(*cursor, src, len);
+	*dst = *cursor;
+	*cursor += len;
+	*remaining -= len;
+	return 1;
+}
+
+static int
+parse_number(const char *field, long long min, long long max, long long *value)
+{
+	char *end = NULL;
+	long long parsed;
+
+	errno = 0;
+	parsed = strtoll(field, &end, 10);
+	if (end == field || *end != '\0' || errno != 0)
+		return 0;
+	if (parsed < min || parsed > max)
+		return 0;
+	*value = parsed;
+	return 1;
+}
+
+static int
+parse_passwd_line(char *line, struct passwd *pw, char *buf, size_t buflen,
+    bool master_format, bool *has_shadow)
+{
+	char *fields[10] = {0};
+	char *cursor = buf;
+	size_t remaining = buflen;
+	char *bp = line;
+	int expected = master_format ? 10 : 7;
+	int i;
+	long long num;
+
+	for (i = 0; i < expected; i++) {
+		fields[i] = strsep(&bp, ":\n");
+		if (fields[i] == NULL)
+			return 0;
+	}
+	if (bp != NULL && *bp != '\0')
+		return 0;
+
+	if (!copy_field(&pw->pw_name, &cursor, &remaining, fields[0]))
+		return 0;
+	if (!copy_field(&pw->pw_passwd, &cursor, &remaining, fields[1]))
+		return 0;
+	if (!parse_number(fields[2], 0, UINT_MAX, &num))
+		return 0;
+	pw->pw_uid = (uid_t)num;
+	if (!parse_number(fields[3], INT_MIN, INT_MAX, &num))
+		return 0;
+	pw->pw_gid = (gid_t)num;
+
+	pw->pw_change = 0;
+	pw->pw_class = (char *)"";
+	pw->pw_expire = 0;
+	if (master_format) {
+		if (!copy_field(&pw->pw_class, &cursor, &remaining, fields[4]))
+			return 0;
+		if (!parse_number(fields[5], LLONG_MIN, LLONG_MAX, &num))
+			return 0;
+		pw->pw_change = (time_t)num;
+		if (!parse_number(fields[6], LLONG_MIN, LLONG_MAX, &num))
+			return 0;
+		pw->pw_expire = (time_t)num;
+		if (!copy_field(&pw->pw_gecos, &cursor, &remaining, fields[7]))
+			return 0;
+		if (!copy_field(&pw->pw_dir, &cursor, &remaining, fields[8]))
+			return 0;
+		if (!copy_field(&pw->pw_shell, &cursor, &remaining, fields[9]))
+			return 0;
+	} else {
+		if (!copy_field(&pw->pw_gecos, &cursor, &remaining, fields[4]))
+			return 0;
+		if (!copy_field(&pw->pw_dir, &cursor, &remaining, fields[5]))
+			return 0;
+		if (!copy_field(&pw->pw_shell, &cursor, &remaining, fields[6]))
+			return 0;
+	}
+
+	if (has_shadow != NULL)
+		*has_shadow = master_format;
+	return 1;
+}
+
+static FILE *
+open_passwd_file(bool shadow, bool *master_format)
+{
+	FILE *fp;
+
+	if (shadow) {
+		fp = fopen(_PATH_MASTERPASSWD, "re");
+		if (fp != NULL) {
+			*master_format = true;
+			return fp;
+		}
+	}
+
+	fp = fopen(_PATH_PASSWD, "re");
+	if (fp != NULL) {
+		*master_format = false;
+		return fp;
+	}
+
+	return NULL;
+}
+
+static int
+read_passwd_file(FILE *fp, struct passwd *pw, char *buf, size_t buflen,
+    bool master_format, bool match_uid, uid_t uid, const char *name,
+    bool *has_shadow)
+{
+	char line[_PW_LINE_LEN];
+
+	while (fgets(line, sizeof(line), fp) != NULL) {
+		if (line[0] == '#' || line[0] == '\n')
+			continue;
+		if (strchr(line, '\n') == NULL) {
+			int ch;
+
+			while ((ch = getc_unlocked(fp)) != '\n' && ch != EOF)
+				;
+			continue;
+		}
+		if (!parse_passwd_line(line, pw, buf, buflen, master_format, has_shadow))
+			continue;
+		if (match_uid) {
+			if (pw->pw_uid == uid)
+				return 1;
+		} else if (name == NULL || strcmp(pw->pw_name, name) == 0) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
 struct passwd *
 ie_getpwent(void)
 {
-	char bf[1 + sizeof(_pw_keynum)];
-	struct passwd *pw, *ret = NULL;
+	struct passwd *pw;
 	char *pwbuf;
 	size_t buflen;
-	DBT key;
+	bool master_format = false;
+	bool has_shadow = false;
+	struct passwd *ret = NULL;
+	int saved_errno;
 
 	_THREAD_PRIVATE_MUTEX_LOCK(pw);
-	if (!_pw_db && !__initdb(geteuid() == 0 ? true : false))
-		goto done;
+	saved_errno = errno;
 
-	/* Allocate space for struct and strings, unmapping the old. */
+	if (_pw_fp == NULL) {
+		_pw_fp = open_passwd_file(geteuid() == 0, &master_format);
+		if (_pw_fp == NULL)
+			goto done;
+		_pw_master_format = master_format;
+	} else {
+		master_format = _pw_master_format;
+	}
+
 	if ((pw = __get_pw_buf(&pwbuf, &buflen, -1, NULL)) == NULL)
 		goto done;
 
-
-	++_pw_keynum;
-	bf[0] = _PW_KEYBYNUM;
-	bcopy((char *)&_pw_keynum, &bf[1], sizeof(_pw_keynum));
-	key.data = (u_char *)bf;
-	key.size = 1 + sizeof(_pw_keynum);
-	if (__hashpw(&key, pwbuf, buflen, pw, &_pw_flags)) {
+	if (read_passwd_file(_pw_fp, pw, pwbuf, buflen, master_format, false,
+	    (uid_t)-1, NULL, &has_shadow))
 		ret = pw;
-		goto done;
-	}
-
-done:
+	done:
+	if (ret == NULL)
+		errno = saved_errno;
 	_THREAD_PRIVATE_MUTEX_UNLOCK(pw);
-	return (ret);
-}
-
-
-static struct passwd *
-_pwhashbyname(const char *name, char *buf, size_t buflen, struct passwd *pw,
-    int *flagsp)
-{
-	char bf[1 + _PW_NAME_LEN];
-	size_t len;
-	DBT key;
-	int r;
-
-	len = strlen(name);
-	if (len > _PW_NAME_LEN)
-		return (NULL);
-	bf[0] = _PW_KEYBYNAME;
-	bcopy(name, &bf[1], MINIMUM(len, _PW_NAME_LEN));
-	key.data = (u_char *)bf;
-	key.size = 1 + MINIMUM(len, _PW_NAME_LEN);
-	r = __hashpw(&key, buf, buflen, pw, flagsp);
-	if (r)
-		return (pw);
-	return (NULL);
-}
-
-static struct passwd *
-_pwhashbyuid(uid_t uid, char *buf, size_t buflen, struct passwd *pw,
-    int *flagsp)
-{
-	char bf[1 + sizeof(int)];
-	DBT key;
-	int r;
-
-	bf[0] = _PW_KEYBYUID;
-	bcopy(&uid, &bf[1], sizeof(uid));
-	key.data = (u_char *)bf;
-	key.size = 1 + sizeof(uid);
-	r = __hashpw(&key, buf, buflen, pw, flagsp);
-	if (r)
-		return (pw);
-	return (NULL);
+	return ret;
 }
 
 static int
@@ -221,32 +304,33 @@ getpwnam_internal(const char *name, struct passwd *pw, char *buf, size_t buflen,
     struct passwd **pwretp, bool shadow, bool reentrant)
 {
 	struct passwd *pwret = NULL;
-	int flags = 0, *flagsp = &flags;
+	bool master_format = false;
+	bool has_shadow = false;
 	int my_errno = 0;
-	int saved_errno, tmp_errno;
+	int saved_errno;
+	FILE *fp;
 
 	_THREAD_PRIVATE_MUTEX_LOCK(pw);
 	saved_errno = errno;
 	errno = 0;
-	if (!_pw_db && !__initdb(shadow))
+	fp = open_passwd_file(shadow, &master_format);
+	if (fp == NULL)
 		goto fail;
 
 	if (!reentrant) {
-		/* Allocate space for struct and strings, unmapping the old. */
-		if ((pw = __get_pw_buf(&buf, &buflen, -1, name)) == NULL)
+		if ((pw = __get_pw_buf(&buf, &buflen, -1, name)) == NULL) {
+			fclose(fp);
 			goto fail;
-		flagsp = &_pw_flags;
+		}
 	}
 
-	if (!pwret)
-		pwret = _pwhashbyname(name, buf, buflen, pw, flagsp);
+	if (read_passwd_file(fp, pw, buf, buflen, master_format, false, (uid_t)-1,
+	    name, &has_shadow))
+		pwret = pw;
+	else if (errno == 0)
+		errno = ENOENT;
 
-	if (!_pw_stayopen) {
-		tmp_errno = errno;
-		(void)(_pw_db->close)(_pw_db);
-		_pw_db = NULL;
-		errno = tmp_errno;
-	}
+	fclose(fp);
 fail:
 	if (pwretp)
 		*pwretp = pwret;
@@ -254,14 +338,15 @@ fail:
 		my_errno = errno;
 	errno = saved_errno;
 	_THREAD_PRIVATE_MUTEX_UNLOCK(pw);
-	return (my_errno);
+	return my_errno;
 }
 
 int
 ie_getpwnam_r(const char *name, struct passwd *pw, char *buf, size_t buflen,
     struct passwd **pwretp)
 {
-	return getpwnam_internal(name, pw, buf, buflen, pwretp, geteuid() == 0 ? true : false, true);
+	return getpwnam_internal(name, pw, buf, buflen, pwretp,
+	    geteuid() == 0, true);
 }
 DEF_WEAK(getpwnam_r);
 
@@ -271,12 +356,13 @@ ie_getpwnam(const char *name)
 	struct passwd *pw = NULL;
 	int my_errno;
 
-	my_errno = getpwnam_internal(name, NULL, NULL, 0, &pw, geteuid() == 0 ? true : false, false);
+	my_errno = getpwnam_internal(name, NULL, NULL, 0, &pw, geteuid() == 0,
+	    false);
 	if (my_errno) {
 		pw = NULL;
 		errno = my_errno;
 	}
-	return (pw);
+	return pw;
 }
 
 static int
@@ -284,32 +370,33 @@ getpwuid_internal(uid_t uid, struct passwd *pw, char *buf, size_t buflen,
     struct passwd **pwretp, bool shadow, bool reentrant)
 {
 	struct passwd *pwret = NULL;
-	int flags = 0, *flagsp = &flags;
+	bool master_format = false;
+	bool has_shadow = false;
 	int my_errno = 0;
-	int saved_errno, tmp_errno;
+	int saved_errno;
+	FILE *fp;
 
 	_THREAD_PRIVATE_MUTEX_LOCK(pw);
 	saved_errno = errno;
 	errno = 0;
-	if (!_pw_db && !__initdb(shadow))
+	fp = open_passwd_file(shadow, &master_format);
+	if (fp == NULL)
 		goto fail;
 
 	if (!reentrant) {
-		/* Allocate space for struct and strings, unmapping the old. */
-		if ((pw = __get_pw_buf(&buf, &buflen, uid, NULL)) == NULL)
+		if ((pw = __get_pw_buf(&buf, &buflen, uid, NULL)) == NULL) {
+			fclose(fp);
 			goto fail;
-		flagsp = &_pw_flags;
+		}
 	}
 
-	if (!pwret)
-		pwret = _pwhashbyuid(uid, buf, buflen, pw, flagsp);
+	if (read_passwd_file(fp, pw, buf, buflen, master_format, true, uid, NULL,
+	    &has_shadow))
+		pwret = pw;
+	else if (errno == 0)
+		errno = ENOENT;
 
-	if (!_pw_stayopen) {
-		tmp_errno = errno;
-		(void)(_pw_db->close)(_pw_db);
-		_pw_db = NULL;
-		errno = tmp_errno;
-	}
+	fclose(fp);
 fail:
 	if (pwretp)
 		*pwretp = pwret;
@@ -317,15 +404,15 @@ fail:
 		my_errno = errno;
 	errno = saved_errno;
 	_THREAD_PRIVATE_MUTEX_UNLOCK(pw);
-	return (my_errno);
+	return my_errno;
 }
-
 
 int
 ie_getpwuid_r(uid_t uid, struct passwd *pw, char *buf, size_t buflen,
     struct passwd **pwretp)
 {
-	return getpwuid_internal(uid, pw, buf, buflen, pwretp, geteuid() == 0 ? true : false, true);
+	return getpwuid_internal(uid, pw, buf, buflen, pwretp, geteuid() == 0,
+	    true);
 }
 DEF_WEAK(ie_getpwuid_r);
 
@@ -335,29 +422,31 @@ ie_getpwuid(uid_t uid)
 	struct passwd *pw = NULL;
 	int my_errno;
 
-	my_errno = getpwuid_internal(uid, NULL, NULL, 0, &pw, geteuid() == 0 ? true : false, false);
+	my_errno = getpwuid_internal(uid, NULL, NULL, 0, &pw, geteuid() == 0,
+	    false);
 	if (my_errno) {
 		pw = NULL;
 		errno = my_errno;
 	}
-	return (pw);
+	return pw;
 }
 
 int
 ie_setpassent(int stayopen)
 {
 	_THREAD_PRIVATE_MUTEX_LOCK(pw);
-	_pw_keynum = 0;
+	if (_pw_fp != NULL)
+		rewind(_pw_fp);
 	_pw_stayopen = stayopen;
 	_THREAD_PRIVATE_MUTEX_UNLOCK(pw);
-	return (1);
+	return 1;
 }
 DEF_WEAK(ie_setpassent);
 
 void
 ie_setpwent(void)
 {
-	(void) ie_setpassent(0);
+	(void)ie_setpassent(0);
 }
 
 void
@@ -367,74 +456,10 @@ ie_endpwent(void)
 
 	_THREAD_PRIVATE_MUTEX_LOCK(pw);
 	saved_errno = errno;
-	_pw_keynum = 0;
-	if (_pw_db) {
-		(void)(_pw_db->close)(_pw_db);
-		_pw_db = NULL;
+	if (_pw_fp != NULL) {
+		fclose(_pw_fp);
+		_pw_fp = NULL;
 	}
 	errno = saved_errno;
 	_THREAD_PRIVATE_MUTEX_UNLOCK(pw);
-}
-
-static int
-__initdb(int shadow)
-{
-	static int warned;
-	int saved_errno = errno;
-
-	if (shadow)
-		_pw_db = dbopen(_PATH_SMP_DB, O_RDONLY, 0, DB_HASH, NULL);
-	if (!_pw_db)
-	    _pw_db = dbopen(_PATH_MP_DB, O_RDONLY, 0, DB_HASH, NULL);
-	if (_pw_db) {
-		errno = saved_errno;
-		return (1);
-	}
-	if (!warned) {
-		saved_errno = errno;
-		errno = saved_errno;
-		warned = 1;
-	}
-	return (0);
-}
-
-static int
-__hashpw(DBT *key, char *buf, size_t buflen, struct passwd *pw,
-    int *flagsp)
-{
-	char *p, *t;
-	DBT data;
-
-	if ((_pw_db->get)(_pw_db, key, &data, 0))
-		return (0);
-	p = (char *)data.data;
-	if (data.size > buflen) {
-		errno = ERANGE;
-		return (0);
-	}
-
-	t = buf;
-#define	EXPAND(e)	e = t; while ((*t++ = *p++));
-	EXPAND(pw->pw_name);
-	EXPAND(pw->pw_passwd);
-	bcopy(p, (char *)&pw->pw_uid, sizeof(int));
-	p += sizeof(int);
-	bcopy(p, (char *)&pw->pw_gid, sizeof(int));
-	p += sizeof(int);
-	bcopy(p, (char *)&pw->pw_change, sizeof(time_t));
-	p += sizeof(time_t);
-	EXPAND(pw->pw_class);
-	EXPAND(pw->pw_gecos);
-	EXPAND(pw->pw_dir);
-	EXPAND(pw->pw_shell);
-	bcopy(p, (char *)&pw->pw_expire, sizeof(time_t));
-	p += sizeof(time_t);
-
-	/* See if there's any data left.  If so, read in flags. */
-	if (data.size > (p - (char *)data.data)) {
-		bcopy(p, (char *)flagsp, sizeof(int));
-		p += sizeof(int);
-	} else
-		*flagsp = _PASSWORD_NOUID|_PASSWORD_NOGID;	/* default */
-	return (1);
 }

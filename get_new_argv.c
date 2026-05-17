@@ -23,6 +23,7 @@ get_new_argv(const char *path, char *const argv[])
 	int fd = 0;
 	ssize_t sz = 0;
 	char *startp = NULL, *endp = NULL;
+	int saved_errno = 0;
 
 	if ((fd = open(path, O_RDONLY)) == -1)
 		return NULL;
@@ -34,14 +35,14 @@ get_new_argv(const char *path, char *const argv[])
 		if (interpbuf[0] == '#' && interpbuf[1] == '!') {
 			if ((sz = read(fd, interpbuf, 510)) == -1) {
 				errno = ENOEXEC; /* If we fail to read we should bail */
-				return NULL;
+				goto fail;
 			}
 			/* Find start and end pointer first */
 			startp = interpbuf;
 			for (int i = 0; i < 510; i++, startp++) {
 				if (IS_EOL(*startp)) {
 					errno = ENOEXEC; /* No shebang!? */
-					return NULL;
+					goto fail;
 				} else if (IS_WHITESPACE(*startp)) {
 					/* Keep looking */
 				} else {
@@ -56,7 +57,7 @@ get_new_argv(const char *path, char *const argv[])
 			}
 			if (!IS_EOL(*endp)) {
 				errno = ENOEXEC;
-				return NULL;
+				goto fail;
 			}
 			/* Walk endp back to the first non-whitespace */
 			while (IS_EOL(*endp) || IS_WHITESPACE(*endp))
@@ -107,6 +108,12 @@ get_new_argv(const char *path, char *const argv[])
 finish:
 	close(fd);
 	return newargv;
+
+fail:
+	saved_errno = errno;
+	close(fd);
+	errno = saved_errno;
+	return NULL;
 }
 
 

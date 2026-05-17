@@ -39,6 +39,7 @@
 #include <errno.h>
 
 #include "libiosexec.h"
+#include "paths.h"
 
 #define __THREAD_NAME(name)	__CONCAT(_thread_tagname_,name)
 
@@ -259,7 +260,7 @@ grscan(int search, gid_t gid, const char *name, struct group *p_gr,
 {
 	char *cp, **m;
 	char *bp, *endp;
-	u_long ul;
+	long long ll;
 	char **members;
 	char *line;
 	int saved_errno;
@@ -292,10 +293,13 @@ grscan(int search, gid_t gid, const char *name, struct group *p_gr,
 		p_gr->gr_passwd = strsep(&bp, ":\n");
 		if (!(cp = strsep(&bp, ":\n")))
 			continue;
-		ul = strtoul(cp, &endp, 10);
-		if (endp == cp || *endp != '\0' || ul >= GID_MAX)
+		errno = 0;
+		ll = strtoll(cp, &endp, 10);
+		if (endp == cp || *endp != '\0' || errno != 0)
 			continue;
-		p_gr->gr_gid = ul;
+		if (ll < INT_MIN || ll > INT_MAX)
+			continue;
+		p_gr->gr_gid = (gid_t)ll;
 		if (search && name == NULL && p_gr->gr_gid != gid)
 			continue;
 		cp = NULL;
