@@ -1,0 +1,66 @@
+#!/usr/bin/make -f
+
+DEB_HOST_ARCH ?= $(shell dpkg-architecture -qDEB_HOST_ARCH 2>/dev/null || echo unknown)
+
+ifeq ($(DEB_HOST_ARCH),iphoneos-arm64)
+ROOT_PREFIX := /var/jb
+ROOT_PATH := var/jb
+LIBIOSEXEC_PREFIXED_ROOT := 1
+DARWIN_FAT_ARCHS := -arch arm64 -arch arm64e
+else ifeq ($(DEB_HOST_ARCH),iphoneos-arm)
+ROOT_PREFIX :=
+ROOT_PATH :=
+LIBIOSEXEC_PREFIXED_ROOT := 0
+DARWIN_FAT_ARCHS := -arch arm64 -arch arm64e
+else
+ROOT_PREFIX :=
+ROOT_PATH :=
+LIBIOSEXEC_PREFIXED_ROOT := 0
+DARWIN_FAT_ARCHS :=
+endif
+
+PREFIX := $(ROOT_PREFIX)/usr
+SOVER := 1
+PACKAGE_CFLAGS := $(filter-out -mbranch-protection=standard,$(CFLAGS) $(CPPFLAGS)) $(DARWIN_FAT_ARCHS)
+PACKAGE_LDFLAGS := $(LDFLAGS) $(DARWIN_FAT_ARCHS)
+
+MAKE_COMMON = \
+	CC="$(CC)" \
+	MEMO_PREFIX="$(ROOT_PREFIX)" \
+	MEMO_SUB_PREFIX=/usr \
+	LIBIOSEXEC_PREFIXED_ROOT=$(LIBIOSEXEC_PREFIXED_ROOT) \
+	ROOTLESS_PREFIX=/var/jb
+
+%:
+	dh $@
+
+override_dh_update_autotools_config:
+	for file in debian/*.install.in; do \
+		[ -e "$$file" ] || continue; \
+		out=$${file%.in}; \
+		sed "s#@ROOT_PATH@#$(ROOT_PATH)#g" "$$file" > "$$out"; \
+	done
+	dh_update_autotools_config
+
+override_dh_auto_build:
+	CFLAGS="$(PACKAGE_CFLAGS)" LDFLAGS="$(PACKAGE_LDFLAGS)" $(MAKE) $(MAKE_COMMON)
+	if command -v ldid >/dev/null 2>&1; then ldid -S libiosexec.$(SOVER).dylib; fi
+
+override_dh_auto_install:
+	CFLAGS="$(PACKAGE_CFLAGS)" LDFLAGS="$(PACKAGE_LDFLAGS)" $(MAKE) install DESTDIR="$(CURDIR)/debian/tmp" $(MAKE_COMMON)
+
+override_dh_auto_clean:
+	$(MAKE) clean || true
+	rm -f debian/*.install
+
+override_dh_strip:
+	# Darwin Mach-O stripping is intentionally left to the platform toolchain.
+
+override_dh_makeshlibs:
+	dh_makeshlibs -plibiosexec1 -V'libiosexec1 (>= 1.3.1+remorix1)'
+
+override_dh_shlibdeps:
+	dh_shlibdeps -- --ignore-missing-info
+
+override_dh_missing:
+	dh_missing --fail-missing

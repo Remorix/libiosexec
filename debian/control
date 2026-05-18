@@ -1,0 +1,32 @@
+Source: libiosexec
+Section: libs
+Priority: optional
+Maintainer: Torrekie <me@torrekie.dev>
+Build-Depends:
+ debhelper-compat (= 13),
+ clang [iphoneos-arm64 iphoneos-arm],
+ ldid [iphoneos-arm64 iphoneos-arm]
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Homepage: https://github.com/Remorix/libiosexec
+
+Package: libiosexec1
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends}
+Description: iOS exec wrapper runtime library
+ libiosexec provides wrappers for exec, posix_spawn, and related libc entry
+ points so scripts and rootless account metadata behave consistently on iOS.
+ .
+ This package contains the runtime shared library.
+
+Package: libiosexec-dev
+Section: libdevel
+Architecture: any
+Depends:
+ libiosexec1 (= ${binary:Version}),
+ ${misc:Depends}
+Description: development files for libiosexec
+ This package contains the header, static archive, and development symlink
+ needed to build software against libiosexec.
