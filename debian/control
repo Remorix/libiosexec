@@ -1,6 +1,6 @@
 Source: libiosexec
 Section: Development
-Priority: required
+Priority: optional
 Maintainer: Torrekie <me@torrekie.dev>
 Build-Depends:
  debhelper-compat (= 13),
@@ -14,6 +14,8 @@ Homepage: https://github.com/Remorix/libiosexec
 Package: libiosexec1
 Name: libiosexec
 Architecture: any
+Essential: yes
+Priority: required
 Depends:
  ${shlibs:Depends},
  ${misc:Depends}
