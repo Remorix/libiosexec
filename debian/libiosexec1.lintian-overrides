@@ -1,3 +1,0 @@
-# Darwin libraries use install names and Mach-O .dylib filenames.
-package-name-doesnt-match-sonames
-shared-library-lacks-version
