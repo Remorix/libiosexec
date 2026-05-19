@@ -54,8 +54,8 @@ ROOTLESS_MASTERPASSWD ?= $(SHEBANG_REDIRECT_PATH)/etc/master.passwd
 ROOTLESS_GROUP ?= $(SHEBANG_REDIRECT_PATH)/etc/group
 ROOTLESS_MP_DB ?= $(SHEBANG_REDIRECT_PATH)/etc/pwd.db
 ROOTLESS_SMP_DB ?= $(SHEBANG_REDIRECT_PATH)/etc/spwd.db
-REDIRECTED_DEFAULT_PATH := $(shell printf "%s\n" "$(DEFAULT_PATH)" | tr ':' '\n' | sed 'p; s|^|$(SHEBANG_REDIRECT_PATH)|' | tr '\n' ':' | sed 's|:$$||')
-REDIRECTED_STD_PATH := $(shell printf "%s\n" "$(STD_PATH)" | tr ':' '\n' | sed 'p; s|^|$(SHEBANG_REDIRECT_PATH)|' | tr '\n' ':' | sed 's|:$$||')
+REDIRECTED_DEFAULT_PATH := $(shell printf "%s\n" "$(DEFAULT_PATH)" | tr ':' '\n' | sed 's|^|$(SHEBANG_REDIRECT_PATH)|; p; s|^$(SHEBANG_REDIRECT_PATH)||' | tr '\n' ':' | sed 's|:$$||')
+REDIRECTED_STD_PATH := $(shell printf "%s\n" "$(STD_PATH)" | tr ':' '\n' | sed 's|^|$(SHEBANG_REDIRECT_PATH)|; p; s|^$(SHEBANG_REDIRECT_PATH)||' | tr '\n' ':' | sed 's|:$$||')
 else
 ROOTLESS_BSHELL ?= /bin/sh
 ROOTLESS_CSHELL ?= /bin/csh
@@ -121,6 +121,7 @@ REGRESS_BUILD_VARS := LIBIOSEXEC_PREFIXED_ROOT=1 SHEBANG_REDIRECT_PATH="$(PWD)/t
 REGRESS_PROGS := tests/t_ie_idlookup \
 	tests/t_ie_getusershell \
 	tests/t_ie_shadowlookup \
+	tests/t_ie_signed_ids \
 	tests/t_ie_exec_errno \
 	tests/t_ie_spawn_errno
 
@@ -159,6 +160,7 @@ regress:
 	./tests/t_ie_idlookup
 	./tests/t_ie_getusershell
 	./tests/t_ie_shadowlookup
+	./tests/t_ie_signed_ids
 	./tests/t_ie_exec_errno ./tests/scripts/nonexec.sh | grep '^13 '
 	./tests/t_ie_spawn_errno ./tests/scripts/nonexec.sh | grep '^13 '
 	PATH="$(REGRESS_PATH)" ./tests/t_ie_execvp $(PWD)/tests/scripts/normal.sh

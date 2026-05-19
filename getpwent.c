@@ -34,6 +34,7 @@
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <db.h>
+#include <stdio.h>
 #include <syslog.h>
 #include <pwd.h>
 #include <errno.h>
@@ -70,6 +71,8 @@ struct pw_storage {
 _THREAD_PRIVATE_KEY(pw);
 
 static DB *_pw_db;			/* password database */
+static FILE *_pw_fp;			/* text password database */
+static int _pw_text_shadow = -1;	/* text database format */
 
 /* mmap'd password storage */
 static struct pw_storage *_pw_storage = MAP_FAILED;
@@ -81,6 +84,14 @@ static int _pw_flags;			/* password flags */
 
 static int __hashpw(DBT *, char *buf, size_t buflen, struct passwd *, int *);
 static int __initdb(int);
+static int __inittextdb(int);
+static void __closetextdb(void);
+static struct passwd *_pwtextbyname(const char *name, char *buf,
+	size_t buflen, struct passwd *pw, int *);
+static struct passwd *_pwtextbyuid(uid_t uid, char *buf,
+	size_t buflen, struct passwd *pw, int *);
+static struct passwd *__pwtextent(char *buf, size_t buflen,
+	struct passwd *pw, int *);
 static struct passwd *_pwhashbyname(const char *name, char *buf,
 	size_t buflen, struct passwd *pw, int *);
 static struct passwd *_pwhashbyuid(uid_t uid, char *buf,
@@ -142,9 +153,11 @@ ie_getpwent(void)
 	char *pwbuf;
 	size_t buflen;
 	DBT key;
+	int shadow;
 
 	_THREAD_PRIVATE_MUTEX_LOCK(pw);
-	if (!_pw_db && !__initdb(geteuid() == 0 ? true : false))
+	shadow = geteuid() == 0 ? true : false;
+	if (!_pw_db && !_pw_fp && !__initdb(shadow) && !__inittextdb(shadow))
 		goto done;
 
 	/* Allocate space for struct and strings, unmapping the old. */
@@ -152,12 +165,17 @@ ie_getpwent(void)
 		goto done;
 
 
-	++_pw_keynum;
-	bf[0] = _PW_KEYBYNUM;
-	bcopy((char *)&_pw_keynum, &bf[1], sizeof(_pw_keynum));
-	key.data = (u_char *)bf;
-	key.size = 1 + sizeof(_pw_keynum);
-	if (__hashpw(&key, pwbuf, buflen, pw, &_pw_flags)) {
+	if (_pw_db != NULL) {
+		++_pw_keynum;
+		bf[0] = _PW_KEYBYNUM;
+		bcopy((char *)&_pw_keynum, &bf[1], sizeof(_pw_keynum));
+		key.data = (u_char *)bf;
+		key.size = 1 + sizeof(_pw_keynum);
+		if (__hashpw(&key, pwbuf, buflen, pw, &_pw_flags)) {
+			ret = pw;
+			goto done;
+		}
+	} else if (__pwtextent(pwbuf, buflen, pw, &_pw_flags)) {
 		ret = pw;
 		goto done;
 	}
@@ -220,8 +238,6 @@ getpwnam_internal(const char *name, struct passwd *pw, char *buf, size_t buflen,
 	_THREAD_PRIVATE_MUTEX_LOCK(pw);
 	saved_errno = errno;
 	errno = 0;
-	if (!_pw_db && !__initdb(shadow))
-		goto fail;
 
 	if (!reentrant) {
 		/* Allocate space for struct and strings, unmapping the old. */
@@ -230,15 +246,19 @@ getpwnam_internal(const char *name, struct passwd *pw, char *buf, size_t buflen,
 		flagsp = &_pw_flags;
 	}
 
-	if (!pwret)
+	if (_pw_db != NULL || __initdb(shadow))
 		pwret = _pwhashbyname(name, buf, buflen, pw, flagsp);
+	if (pwret == NULL)
+		pwret = _pwtextbyname(name, buf, buflen, pw, flagsp);
 
-	if (!_pw_stayopen) {
+	if (!_pw_stayopen && _pw_db != NULL) {
 		tmp_errno = errno;
 		(void)(_pw_db->close)(_pw_db);
 		_pw_db = NULL;
 		errno = tmp_errno;
 	}
+	if (!_pw_stayopen)
+		__closetextdb();
 fail:
 	if (pwretp)
 		*pwretp = pwret;
@@ -283,8 +303,6 @@ getpwuid_internal(uid_t uid, struct passwd *pw, char *buf, size_t buflen,
 	_THREAD_PRIVATE_MUTEX_LOCK(pw);
 	saved_errno = errno;
 	errno = 0;
-	if (!_pw_db && !__initdb(shadow))
-		goto fail;
 
 	if (!reentrant) {
 		/* Allocate space for struct and strings, unmapping the old. */
@@ -293,15 +311,19 @@ getpwuid_internal(uid_t uid, struct passwd *pw, char *buf, size_t buflen,
 		flagsp = &_pw_flags;
 	}
 
-	if (!pwret)
+	if (_pw_db != NULL || __initdb(shadow))
 		pwret = _pwhashbyuid(uid, buf, buflen, pw, flagsp);
+	if (pwret == NULL)
+		pwret = _pwtextbyuid(uid, buf, buflen, pw, flagsp);
 
-	if (!_pw_stayopen) {
+	if (!_pw_stayopen && _pw_db != NULL) {
 		tmp_errno = errno;
 		(void)(_pw_db->close)(_pw_db);
 		_pw_db = NULL;
 		errno = tmp_errno;
 	}
+	if (!_pw_stayopen)
+		__closetextdb();
 fail:
 	if (pwretp)
 		*pwretp = pwret;
@@ -341,6 +363,8 @@ ie_setpassent(int stayopen)
 	_THREAD_PRIVATE_MUTEX_LOCK(pw);
 	_pw_keynum = 0;
 	_pw_stayopen = stayopen;
+	if (_pw_fp != NULL)
+		rewind(_pw_fp);
 	_THREAD_PRIVATE_MUTEX_UNLOCK(pw);
 	return (1);
 }
@@ -364,6 +388,7 @@ ie_endpwent(void)
 		(void)(_pw_db->close)(_pw_db);
 		_pw_db = NULL;
 	}
+	__closetextdb();
 	errno = saved_errno;
 	_THREAD_PRIVATE_MUTEX_UNLOCK(pw);
 }
@@ -388,6 +413,186 @@ __initdb(int shadow)
 		warned = 1;
 	}
 	return (0);
+}
+
+static int
+__inittextdb(int shadow)
+{
+	const char *path;
+
+	if (_pw_fp != NULL) {
+		if (_pw_text_shadow == shadow) {
+			rewind(_pw_fp);
+			return (1);
+		}
+		__closetextdb();
+	}
+
+	path = shadow ? _PATH_MASTERPASSWD : _PATH_PASSWD;
+	_pw_fp = fopen(path, "re");
+	_pw_text_shadow = shadow;
+	if (_pw_fp == NULL && shadow) {
+		_pw_fp = fopen(_PATH_PASSWD, "re");
+		_pw_text_shadow = 0;
+	}
+
+	return (_pw_fp != NULL);
+}
+
+static void
+__closetextdb(void)
+{
+	if (_pw_fp != NULL) {
+		fclose(_pw_fp);
+		_pw_fp = NULL;
+	}
+	_pw_text_shadow = -1;
+}
+
+static int
+__pwtextparse(char *line, char *buf, size_t buflen, struct passwd *pw,
+    int *flagsp, int shadow)
+{
+	char *fields[10];
+	char *bp, *endp, *out;
+	size_t need, len;
+	int nfields, i;
+	long id;
+
+	line[strcspn(line, "\n")] = '\0';
+	bp = line;
+	for (nfields = 0; nfields < 10; nfields++) {
+		fields[nfields] = strsep(&bp, ":");
+		if (fields[nfields] == NULL)
+			break;
+	}
+	if ((shadow && nfields != 10) || (!shadow && nfields != 7))
+		return (0);
+
+	need = 0;
+	for (i = 0; i < nfields; i++)
+		need += strlen(fields[i]) + 1;
+	if (!shadow)
+		need++;
+	if (need > buflen) {
+		errno = ERANGE;
+		return (0);
+	}
+
+	out = buf;
+#define	COPY_FIELD(dst, src) do {			\
+	len = strlen(src) + 1;				\
+	memcpy(out, src, len);				\
+	dst = out;					\
+	out += len;					\
+} while (0)
+	COPY_FIELD(pw->pw_name, fields[0]);
+	COPY_FIELD(pw->pw_passwd, fields[1]);
+	id = strtol(fields[2], &endp, 10);
+	if (endp == fields[2] || *endp != '\0')
+		return (0);
+	pw->pw_uid = (uid_t)id;
+	id = strtol(fields[3], &endp, 10);
+	if (endp == fields[3] || *endp != '\0')
+		return (0);
+	pw->pw_gid = (gid_t)id;
+	if (shadow) {
+		id = strtol(fields[5], &endp, 10);
+		if (endp == fields[5] || *endp != '\0')
+			return (0);
+		pw->pw_change = (time_t)id;
+		COPY_FIELD(pw->pw_class, fields[4]);
+		COPY_FIELD(pw->pw_gecos, fields[7]);
+		COPY_FIELD(pw->pw_dir, fields[8]);
+		COPY_FIELD(pw->pw_shell, fields[9]);
+		id = strtol(fields[6], &endp, 10);
+		if (endp == fields[6] || *endp != '\0')
+			return (0);
+		pw->pw_expire = (time_t)id;
+	} else {
+		pw->pw_change = 0;
+		COPY_FIELD(pw->pw_class, "");
+		COPY_FIELD(pw->pw_gecos, fields[4]);
+		COPY_FIELD(pw->pw_dir, fields[5]);
+		COPY_FIELD(pw->pw_shell, fields[6]);
+		pw->pw_expire = 0;
+	}
+#undef COPY_FIELD
+	*flagsp = 0;
+	return (1);
+}
+
+static struct passwd *
+__pwtextscan(const char *name, uid_t uid, int search_uid, char *buf,
+    size_t buflen, struct passwd *pw, int *flagsp)
+{
+	char line[_PW_BUF_LEN];
+	int shadow;
+
+	if (_pw_fp == NULL && !__inittextdb(geteuid() == 0 ? true : false))
+		return (NULL);
+	shadow = _pw_text_shadow;
+	rewind(_pw_fp);
+	while (fgets(line, sizeof(line), _pw_fp) != NULL) {
+		if (line[0] == '#')
+			continue;
+		if (!strchr(line, '\n')) {
+			int ch;
+
+			while ((ch = getc_unlocked(_pw_fp)) != '\n' &&
+			    ch != EOF)
+				;
+			continue;
+		}
+		if (!__pwtextparse(line, buf, buflen, pw, flagsp, shadow))
+			continue;
+		if (name != NULL && strcmp(pw->pw_name, name) != 0)
+			continue;
+		if (search_uid && pw->pw_uid != uid)
+			continue;
+		return (pw);
+	}
+	return (NULL);
+}
+
+static struct passwd *
+_pwtextbyname(const char *name, char *buf, size_t buflen, struct passwd *pw,
+    int *flagsp)
+{
+	return __pwtextscan(name, (uid_t)-1, 0, buf, buflen, pw, flagsp);
+}
+
+static struct passwd *
+_pwtextbyuid(uid_t uid, char *buf, size_t buflen, struct passwd *pw,
+    int *flagsp)
+{
+	return __pwtextscan(NULL, uid, 1, buf, buflen, pw, flagsp);
+}
+
+static struct passwd *
+__pwtextent(char *buf, size_t buflen, struct passwd *pw, int *flagsp)
+{
+	char line[_PW_BUF_LEN];
+	int shadow;
+
+	if (_pw_fp == NULL && !__inittextdb(geteuid() == 0 ? true : false))
+		return (NULL);
+	shadow = _pw_text_shadow;
+	while (fgets(line, sizeof(line), _pw_fp) != NULL) {
+		if (line[0] == '#')
+			continue;
+		if (!strchr(line, '\n')) {
+			int ch;
+
+			while ((ch = getc_unlocked(_pw_fp)) != '\n' &&
+			    ch != EOF)
+				;
+			continue;
+		}
+		if (__pwtextparse(line, buf, buflen, pw, flagsp, shadow))
+			return (pw);
+	}
+	return (NULL);
 }
 
 static int

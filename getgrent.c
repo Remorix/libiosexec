@@ -259,7 +259,7 @@ grscan(int search, gid_t gid, const char *name, struct group *p_gr,
 {
 	char *cp, **m;
 	char *bp, *endp;
-	u_long ul;
+	long id;
 	char **members;
 	char *line;
 	int saved_errno;
@@ -292,10 +292,10 @@ grscan(int search, gid_t gid, const char *name, struct group *p_gr,
 		p_gr->gr_passwd = strsep(&bp, ":\n");
 		if (!(cp = strsep(&bp, ":\n")))
 			continue;
-		ul = strtoul(cp, &endp, 10);
-		if (endp == cp || *endp != '\0' || ul >= GID_MAX)
+		id = strtol(cp, &endp, 10);
+		if (endp == cp || *endp != '\0')
 			continue;
-		p_gr->gr_gid = ul;
+		p_gr->gr_gid = (gid_t)id;
 		if (search && name == NULL && p_gr->gr_gid != gid)
 			continue;
 		cp = NULL;
