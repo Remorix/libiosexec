@@ -58,14 +58,5 @@ override_dh_auto_clean:
 	$(MAKE) clean || true
 	rm -f debian/*.install
 
-override_dh_strip:
-	# Darwin Mach-O stripping is intentionally left to the platform toolchain.
-
 override_dh_makeshlibs:
 	dh_makeshlibs -plibiosexec1 -V'libiosexec1 (>= 1.3.1+remorix1)'
-
-override_dh_shlibdeps:
-	dh_shlibdeps -- --ignore-missing-info
-
-override_dh_missing:
-	dh_missing --fail-missing

@@ -1,6 +1,6 @@
 Source: libiosexec
-Section: libs
-Priority: optional
+Section: Development
+Priority: required
 Maintainer: Torrekie <me@torrekie.dev>
 Build-Depends:
  debhelper-compat (= 13),
@@ -8,9 +8,11 @@ Build-Depends:
  ldid [iphoneos-arm64 iphoneos-arm]
 Standards-Version: 4.7.0
 Rules-Requires-Root: no
+Tag: purpose::library, role::developer
 Homepage: https://github.com/Remorix/libiosexec
 
 Package: libiosexec1
+Name: libiosexec
 Architecture: any
 Depends:
  ${shlibs:Depends},
@@ -22,11 +24,11 @@ Description: iOS exec wrapper runtime library
  This package contains the runtime shared library.
 
 Package: libiosexec-dev
-Section: libdevel
+Name: libiosexec (development files)
 Architecture: any
 Depends:
  libiosexec1 (= ${binary:Version}),
  ${misc:Depends}
-Description: development files for libiosexec
+Description: iOS exec wrapper runtime library (development files)
  This package contains the header, static archive, and development symlink
  needed to build software against libiosexec.
