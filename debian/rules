@@ -29,6 +29,7 @@ PACKAGE_LDFLAGS := $(filter-out -liosexec,$(LDFLAGS)) $(DARWIN_FAT_ARCHS)
 
 MAKE_COMMON = \
 	CC="$(CC)" \
+	LIBTOOL="libtool" \
 	MEMO_PREFIX="$(ROOT_PREFIX)" \
 	MEMO_SUB_PREFIX=/usr \
 	DEFAULT_INTERPRETER="$(ROOT_PREFIX)/bin/sh" \

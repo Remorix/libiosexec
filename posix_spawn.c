@@ -18,7 +18,7 @@ int ie_posix_spawn(pid_t *pid, const char *path,
    int err;
    err = posix_spawn(pid, path, file_actions, attrp, argv, envp);
 
-   if (err != EPERM && err != ENOEXEC) {
+   if (err != EPERM && err != ENOEXEC && err != ENOENT) {
        return err;
    }
 

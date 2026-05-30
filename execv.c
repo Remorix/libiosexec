@@ -26,7 +26,7 @@ int ie_execve(const char* path, char* const argv[], char* const envp[]) {
 
     int execve_ret = errno;
 
-    if (execve_ret != EPERM && execve_ret != ENOEXEC) {
+    if (execve_ret != EPERM && execve_ret != ENOEXEC && execve_ret != ENOENT) {
         return -1;
     }
 

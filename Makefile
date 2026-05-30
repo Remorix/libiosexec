@@ -1,5 +1,6 @@
 CC       ?= cc
 AR       ?= ar
+LIBTOOL  ?= libtool
 LN       ?= ln
 RANLIB   ?= ranlib
 INSTALL  ?= install
@@ -101,8 +102,12 @@ else ifeq ($(shell uname -s), Darwin)
 endif
 
 libiosexec.a: $(SRC:%.c=%.o)
+ifeq ($(shell uname -s), Darwin)
+	$(LIBTOOL) -static -o $@ $^
+else
 	$(AR) cru $@ $^
 	$(RANLIB) $@
+endif
 
 
 TEST_progs := tests/t_ie_execve \
